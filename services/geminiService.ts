@@ -155,7 +155,7 @@ const callAiGateway = async (systemPrompt: string, userPrompt: string): Promise<
         stream: false,
         // Forcing JSON output is critical for this app's structured responses
     };
-
+    console.log(`[AI Service] Sending  request to Gateway with body:`, JSON.stringify(requestBody, null, 2));
     const response = await fetch(fullGatewayUrl, {
         method: 'POST',
         headers: {
