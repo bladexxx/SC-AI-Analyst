@@ -1,22 +1,25 @@
 import React, { useState, useRef, useEffect } from 'react';
-import type { ChatMessage, CSVData, AIResponseBlock } from './types';
+import type { ChatMessage, CSVData, AIResponseBlock, KnowledgeFile } from './types';
 import { generateInsights } from './services/geminiService';
 import AIResponse from './components/MetricCard';
 import Spinner from './components/Spinner';
-import { UploadIcon, CheckCircleIcon, LightBulbIcon, SendIcon, ChartBarIcon } from './components/icons';
+import { UploadIcon, LightBulbIcon, SendIcon, ChartBarIcon, BookOpenIcon } from './components/icons';
+import KnowledgeBaseModal from './components/KnowledgeBaseModal';
 
 const parseCSV = (csvText: string): CSVData => {
   const lines = csvText.trim().split('\n');
   const headers = lines[0].split(',').map(h => h.trim());
   const rows = lines.slice(1).map(line => {
-    const values = line.split(',').map(v => v.trim());
+    // A more robust way to handle commas inside quoted fields
+    const values = line.match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g) || [];
     return headers.reduce((obj, header, index) => {
-      obj[header] = values[index];
+      obj[header] = (values[index] || '').replace(/"/g, '').trim();
       return obj;
     }, {} as Record<string, string>);
   });
   return { headers, rows };
 };
+
 
 const sampleCSVData = `loc_no,vend_no,vend_code,order_no,carrier,pack_list_no,rec_date,tracking_no,vend_track_no,api_source,return_po,week_period,week_begin,run_date
 101,5001,VEND-A,PO12345,UPS,PL54321,2023-10-26,1Z999AA10123456789,1Z999AA10123456789,EDI,PO12345,43,2023-10-23,2023-10-27
@@ -28,6 +31,7 @@ const sampleCSVData = `loc_no,vend_no,vend_code,order_no,carrier,pack_list_no,re
 101,5004,VEND-D,PO12351,UPS,PL54327,2023-10-29,1Z999AA10123456793,1Z999BB10123456793,EDI,PO12351,44,2023-10-30,2023-10-27
 102,5002,VEND-B,PO12352,FEDEX,PL54328,2023-10-29,781234567893,,API,,44,2023-10-30,2023-10-27`;
 
+const KNOWLEDGE_STORAGE_KEY = 'supplyChainAI_knowledgeBase';
 
 const App: React.FC = () => {
   const [csvData, setCsvData] = useState<CSVData | null>(null);
@@ -36,14 +40,49 @@ const App: React.FC = () => {
   const [userInput, setUserInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string>('');
+  const [knowledgeFiles, setKnowledgeFiles] = useState<KnowledgeFile[]>([]);
+  const [isKnowledgeModalOpen, setIsKnowledgeModalOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Load knowledge files from localStorage on initial render
+  useEffect(() => {
+    try {
+      const storedFiles = localStorage.getItem(KNOWLEDGE_STORAGE_KEY);
+      if (storedFiles) {
+        setKnowledgeFiles(JSON.parse(storedFiles));
+      }
+    } catch (e) {
+      console.error("Failed to load knowledge files from localStorage", e);
+    }
+  }, []);
+  
+  // Save knowledge files to localStorage whenever they change
+  useEffect(() => {
+    try {
+      localStorage.setItem(KNOWLEDGE_STORAGE_KEY, JSON.stringify(knowledgeFiles));
+    } catch (e) {
+      console.error("Failed to save knowledge files to localStorage", e);
+    }
+  }, [knowledgeFiles]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  const handleAddKnowledgeFiles = (newFiles: KnowledgeFile[]) => {
+    setKnowledgeFiles(prevFiles => {
+      const existingFileNames = new Set(prevFiles.map(f => f.name));
+      const uniqueNewFiles = newFiles.filter(nf => !existingFileNames.has(nf.name));
+      return [...prevFiles, ...uniqueNewFiles];
+    });
+  };
+
+  const handleRemoveKnowledgeFile = (fileName: string) => {
+    setKnowledgeFiles(prevFiles => prevFiles.filter(f => f.name !== fileName));
+  };
+  
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
@@ -118,7 +157,11 @@ const App: React.FC = () => {
     setIsLoading(true);
 
     try {
-      const aiResponseBlocks = await generateInsights(csvData, messageText);
+      const knowledgeContent = knowledgeFiles
+        .map(f => `--- KNOWLEDGE FILE: ${f.name} ---\n${f.content}`)
+        .join('\n\n');
+        
+      const aiResponseBlocks = await generateInsights(csvData, messageText, knowledgeContent);
       const modelMessage: ChatMessage = {
         id: `model-${Date.now()}`,
         role: 'model',
@@ -158,9 +201,23 @@ const App: React.FC = () => {
   return (
     <div className="flex flex-col h-screen font-sans">
       <header className="bg-base-200 border-b border-base-300 p-4 shadow-md">
-        <div className="max-w-5xl mx-auto flex items-center gap-3">
-          <ChartBarIcon className="w-8 h-8 text-brand-secondary" />
-          <h1 className="text-xl font-bold text-white">Supply Chain AI Analyst</h1>
+        <div className="max-w-5xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <ChartBarIcon className="w-8 h-8 text-brand-secondary" />
+            <h1 className="text-xl font-bold text-white">Supply Chain AI Analyst</h1>
+          </div>
+          <button
+            onClick={() => setIsKnowledgeModalOpen(true)}
+            className="relative bg-base-300 text-content-100 font-semibold py-2 px-4 rounded-lg hover:bg-base-100 transition-colors flex items-center gap-2"
+          >
+            <BookOpenIcon className="w-5 h-5"/>
+            Manage Knowledge
+            {knowledgeFiles.length > 0 && (
+              <span className="absolute -top-2 -right-2 bg-brand-secondary text-white text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center">
+                {knowledgeFiles.length}
+              </span>
+            )}
+          </button>
         </div>
       </header>
 
@@ -273,6 +330,13 @@ const App: React.FC = () => {
           </div>
         </footer>
       )}
+      <KnowledgeBaseModal 
+        isOpen={isKnowledgeModalOpen}
+        onClose={() => setIsKnowledgeModalOpen(false)}
+        files={knowledgeFiles}
+        onAddFiles={handleAddKnowledgeFiles}
+        onRemoveFile={handleRemoveKnowledgeFile}
+      />
     </div>
   );
 };

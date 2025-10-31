@@ -66,6 +66,8 @@ Here is the definition of the columns in the data:
 
 Your primary goal is to identify discrepancies, summarize performance, and answer user questions.
 
+You have also been provided with a knowledge base containing rules, data structure explanations, or other context. You MUST use this information to inform your analysis.
+
 You MUST respond with a JSON array of "blocks". Each block represents a piece of content to be displayed.
 The response must be a valid JSON array conforming to the following TypeScript interfaces:
 
@@ -99,7 +101,6 @@ export interface ChartData {
   }[];
 }
 
-
 // Your response should be a JSON array of AIResponseBlock objects.
 // Example: 
 // [ 
@@ -115,7 +116,7 @@ export interface ChartData {
 `;
 
 // System instruction for the "Planner" model, which selects necessary columns.
-const plannerSystemInstruction = `You are an efficient data query planner. Your task is to determine the absolute minimum set of columns required to answer the user's question based on the available CSV columns.
+const plannerSystemInstruction = `You are an efficient data query planner. Your task is to determine the absolute minimum set of columns required to answer the user's question based on the available CSV columns and any additional knowledge provided.
 Respond ONLY with a valid JSON object containing a single key "columns", which is an array of column name strings.
 For example: {"columns": ["carrier", "tracking_no"]}.
 If the user asks for a general summary, a broad question, or it is otherwise necessary to see all data, respond with {"columns": ["*"]}.`;
@@ -152,7 +153,7 @@ const callAiGateway = async (systemPrompt: string, userPrompt: string): Promise<
             { role: 'user', content: userPrompt }
         ],
         stream: false,
-        response_format: { "type": "json_object" }
+        // Forcing JSON output is critical for this app's structured responses
     };
 
     const response = await fetch(fullGatewayUrl, {
@@ -171,7 +172,9 @@ const callAiGateway = async (systemPrompt: string, userPrompt: string): Promise<
 
     const responseJson = await response.json();
     if (responseJson.choices && responseJson.choices[0] && responseJson.choices[0].message && responseJson.choices[0].message.content) {
-        return responseJson.choices[0].message.content;
+        const content = responseJson.choices[0].message.content;
+        // Gateways sometimes wrap the JSON in markdown, so we clean it.
+        return content.trim().replace(/^```json\n?/, '').replace(/\n?```$/, '');
     } else {
         throw new Error('Invalid response structure from AI Gateway.');
     }
@@ -180,8 +183,9 @@ const callAiGateway = async (systemPrompt: string, userPrompt: string): Promise<
 /**
  * Step 1: The "Planner" - determines which columns are needed for the query.
  */
-const getRequiredColumnsForQuery = async (headers: string[], prompt: string): Promise<string[]> => {
+const getRequiredColumnsForQuery = async (headers: string[], prompt: string, knowledgeContent: string): Promise<string[]> => {
     const plannerUserPrompt = `
+    ${knowledgeContent ? `--- KNOWLEDGE BASE ---\n${knowledgeContent}\n--- END KNOWLEDGE BASE ---\n\n` : ''}
     User Question: "${prompt}"
     Available Columns: ${JSON.stringify(headers)}
     `;
@@ -210,11 +214,11 @@ const getRequiredColumnsForQuery = async (headers: string[], prompt: string): Pr
 /**
  * Main function to generate insights, orchestrating the Planner and Analyst steps.
  */
-export const generateInsights = async (fullCsvData: CSVData, prompt: string): Promise<AIResponseBlock[]> => {
+export const generateInsights = async (fullCsvData: CSVData, prompt: string, knowledgeContent: string): Promise<AIResponseBlock[]> => {
     try {
         // --- PLANNER STEP ---
         console.log('[AI Service] Step 1: Planning - determining required columns...');
-        const requiredColumns = await getRequiredColumnsForQuery(fullCsvData.headers, prompt);
+        const requiredColumns = await getRequiredColumnsForQuery(fullCsvData.headers, prompt, knowledgeContent);
         console.log('[AI Service] Required columns:', requiredColumns);
 
         let contextualCsvData = fullCsvData;
@@ -235,6 +239,7 @@ export const generateInsights = async (fullCsvData: CSVData, prompt: string): Pr
         console.log('[AI Service] Step 2: Analyzing - generating insights with contextual data...');
         const dataAsText = csvToText(contextualCsvData);
         const fullPrompt = `
+${knowledgeContent ? `--- KNOWLEDGE BASE ---\n${knowledgeContent}\n--- END KNOWLEDGE BASE ---\n\n` : ''}
 Here is the CSV data I'm working with (it has been pre-filtered to include only the columns relevant to my query):
 ---
 ${dataAsText}
@@ -242,7 +247,7 @@ ${dataAsText}
 
 My question is: ${prompt}
 
-Please provide the analysis based on my question.
+Please provide the analysis based on my question and the knowledge base provided.
 `;
         
         let jsonText: string;

@@ -39,3 +39,9 @@ export interface CSVData {
   headers: string[];
   rows: Record<string, string>[];
 }
+
+// Represents an uploaded knowledge file
+export interface KnowledgeFile {
+  name: string;
+  content: string;
+}
