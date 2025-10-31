@@ -1,179 +1,123 @@
+import { GoogleGenAI } from "@google/genai";
+import { AIResponseBlock, CSVData } from '../types';
 
-import { GoogleGenAI, Type, Content } from "@google/genai";
-import type { ChatMessage, AIResponseBlock } from '../types';
+// Per guidelines, API key is from process.env.API_KEY
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
 
-// This declare block informs TypeScript that the process object is globally available.
-// Vite's define configuration will replace these variables with their actual values
-// at build time, preventing runtime errors.
-declare var process: {
-  env: {
-    // This variable is provided by the execution environment, not Vite's define config.
-    API_KEY: string;
-    // These variables are injected by Vite's define config.
-    VITE_AI_PROVIDER: string;
-    VITE_AI_GATEWAY_URL: string;
-    VITE_AI_GATEWAY_API_KEY: string;
-    VITE_AI_GATEWAY_MODEL: string;
-  }
-};
+const model = 'gemini-2.5-pro';
 
-// --- Configuration Loading ---
-const aiProvider = process.env.VITE_AI_PROVIDER || 'GEMINI';
-const gatewayUrl = process.env.VITE_AI_GATEWAY_URL;
-const gatewayApiKey = process.env.VITE_AI_GATEWAY_API_KEY;
-const gatewayModel = process.env.VITE_AI_GATEWAY_MODEL;
-const geminiApiKey = process.env.API_KEY;
-const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash';
+// System instruction updated with domain-specific knowledge about the supply chain data.
+const systemInstruction = `
+You are an expert supply chain data analyst. Your task is to analyze the provided CSV data which contains Advanced Shipment Notice (ASN) and warehouse receiving information.
 
-// --- Startup Logging: Log the configuration as soon as the module is loaded ---
-console.groupCollapsed('[AI Service] Configuration Loaded');
-console.info(`AI Provider: %c${aiProvider}`, 'font-weight: bold;');
-if (aiProvider === 'GATEWAY') {
-    console.log(`Gateway Base URL: ${gatewayUrl || 'Not Set'}`);
-    console.info(`(Note: The final URL will be constructed as \`{Base URL}/{Model}/v1/chat/completions\`)`);
-    console.log(`Gateway Model: ${gatewayModel || `(default: ${GEMINI_DEFAULT_MODEL})`}`);
-    console.log(`Gateway API Key Set: %c${!!gatewayApiKey}`, `font-weight: bold; color: ${!!gatewayApiKey ? 'green' : 'red'};`);
-} else {
-     console.log(`Gemini API Key Set: %c${!!geminiApiKey}`, `font-weight: bold; color: ${!!geminiApiKey ? 'green' : 'red'};`);
+Here is the definition of the columns in the data:
+- loc_no: The warehouse number (numeric).
+- carrier: The shipping carrier (e.g., UPS, FEDEX).
+- rec_date: The date the shipment was received at the warehouse.
+- tracking_no: The tracking number scanned from the package at the warehouse.
+- vend_track_no: The tracking number provided by the vendor in the shipment notice. A key analysis is to compare this with 'tracking_no' for mismatches.
+- api_source: The channel through which the shipment notice was received.
+- return_po: The Purchase Order number matched to the tracking number. Missing values here can indicate a potential problem.
+- run_date: The date this report was generated.
+- week_period / week_begin: The weekly period the data belongs to.
+
+Your primary goal is to identify discrepancies, summarize performance, and answer user questions.
+
+You MUST respond with a JSON array of "blocks". Each block represents a piece of content to be displayed.
+The response must be a valid JSON array conforming to the following TypeScript interfaces:
+
+// A single block of content in an AI response
+export interface AIResponseBlock {
+  type: 'card' | 'table' | 'chart' | 'markdown';
+  data: CardData | TableData | ChartData | string; // For markdown, data is a string. For others, it's an object.
 }
-console.groupEnd();
 
-if (aiProvider === 'GATEWAY' && (!gatewayUrl || !gatewayApiKey)) {
-    console.error('[AI Service] CRITICAL: AI Gateway is the configured provider, but VITE_AI_GATEWAY_URL or VITE_AI_GATEWAY_API_KEY is missing in your .env file.');
-} else if (aiProvider === 'GEMINI' && !geminiApiKey) {
-    console.error('[AI Service] CRITICAL: Gemini is the configured provider, but the API_KEY was not found in the environment.');
+// Data for a 'card' block
+export interface CardData {
+  title: string;
+  value: string;
+  description?: string;
 }
-// --- End of Startup Logging ---
 
-let aiInstance: GoogleGenAI | null = null;
-const getAiInstance = () => {
-    if (!aiInstance) {
-        if (!geminiApiKey) {
-            throw new Error("Gemini API Key is not configured in the execution environment.");
-        }
-        aiInstance = new GoogleGenAI({ apiKey: geminiApiKey });
-    }
-    return aiInstance;
-};
+// Data for a 'table' block
+export interface TableData {
+  headers: string[];
+  rows: (string | number)[][];
+}
 
-// --- System Instructions & Schemas ---
+// Data for a 'chart' block
+export interface ChartData {
+  type: 'bar' | 'pie' | 'line' | 'doughnut';
+  labels: string[];
+  datasets: {
+    label: string;
+    data: number[];
+    backgroundColor?: string[]; // Recommended for pie/doughnut/bar charts
+  }[];
+}
 
-const analysisSystemInstruction = (contextualData: string) => `You are a world-class AI data analyst... (instructions as before)`;
-const responseSchema = { /* ... schema as before ... */ };
-const plannerSystemInstruction = `You are an intelligent data analysis planner... (instructions as before)`;
-const plannerSchema = { /* ... schema as before ... */ };
-// FIX: `analysisSystemInstruction` is a function, so `analysisSystemInstructionForGateway`
-// must also be a function to properly handle the `contextualData` parameter.
-const analysisSystemInstructionForGateway = (contextualData: string) => analysisSystemInstruction(contextualData) + '\n\nYour response MUST be a valid JSON object.';
-const plannerSystemInstructionForGateway = plannerSystemInstruction + `\n\nYour response MUST be a valid JSON object matching this schema: { "columns": ["column_name_1", "column_name_2"] }`;
 
-// --- API Call Functions ---
+// Your response should be a JSON array of AIResponseBlock objects.
+// Example: 
+// [ 
+//   { "type": "markdown", "data": "Here is a summary of the data." }, 
+//   { "type": "card", "data": { "title": "Total Mismatches", "value": "12", "description": "12% of total shipments." } },
+//   { "type": "chart", "data": { "type": "pie", "labels": ["Matched", "Mismatched"], "datasets": [{ "label": "Tracking Numbers", "data": [88, 12] }] } }
+// ]
 
-export const getRequiredColumnsForQuery = async (query: string, headers: string[]): Promise<string[]> => {
-    const prompt = `User Query: "${query}"\nAvailable Columns: [${headers.join(', ')}]`;
+- When creating charts, select appropriate colors. For single-dataset bar/line charts, a single color is fine. For pie/doughnut charts, provide a list of colors for 'backgroundColor'.
+- When the user asks for a summary or general analysis, provide a mix of markdown, cards, and charts focusing on key supply chain metrics like match rates.
+- Keep your analysis concise and directly related to the user's query.
+- The entire response must be a single JSON string, which is an array of these block objects. Do not add any text before or after the JSON array.
+`;
+
+// Helper to convert CSV data to a markdown-like string for the prompt
+const csvToText = (csvData: CSVData): string => {
+    const header = csvData.headers.join(',');
+    const rows = csvData.rows.map(row => csvData.headers.map(h => row[h]).join(','));
+    return [header, ...rows].join('\n');
+}
+
+export const generateInsights = async (csvData: CSVData, prompt: string): Promise<AIResponseBlock[]> => {
     try {
-        let jsonText: string;
+        const dataAsText = csvToText(csvData);
+        const fullPrompt = `
+Here is the CSV data I'm working with:
+---
+${dataAsText}
+---
 
-        if (aiProvider === 'GATEWAY') {
-            const modelToUse = gatewayModel || GEMINI_DEFAULT_MODEL;
-            const fullGatewayUrl = `${gatewayUrl}/${modelToUse}/v1/chat/completions`;
-            const requestBody = {
-                model: modelToUse,
-                messages: [
-                    { role: 'system', content: plannerSystemInstructionForGateway },
-                    { role: 'user', content: prompt }
-                ],
-                stream: false,
-            };
-            const response = await fetch(fullGatewayUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${gatewayApiKey}` },
-                body: JSON.stringify(requestBody)
-            });
-            if (!response.ok) throw new Error(`Gateway request failed with status ${response.status}: ${await response.text()}`);
-            const data = await response.json();
-            jsonText = data.choices[0]?.message?.content;
-            if (!jsonText) throw new Error('Gateway response did not contain expected content.');
-        } else {
-            const ai = getAiInstance();
-            const response = await ai.models.generateContent({
-                model: GEMINI_DEFAULT_MODEL,
-                contents: [{ role: 'user', parts: [{ text: prompt }] }],
-                config: {
-                    systemInstruction: plannerSystemInstruction,
-                    responseMimeType: "application/json",
-                    responseSchema: plannerSchema,
-                }
-            });
-            jsonText = response.text;
-        }
+My question is: ${prompt}
 
-        const parsedResponse = JSON.parse(jsonText.trim());
-        return parsedResponse.columns && Array.isArray(parsedResponse.columns) ? parsedResponse.columns : ['*'];
-    } catch (error) {
-        console.error(`Error in planner AI call (Provider: ${aiProvider}):`, error);
-        return ['*'];
-    }
-};
-
-export const getAIResponse = async (history: ChatMessage[], contextualData: string): Promise<AIResponseBlock[]> => {
-    try {
-        let jsonText: string;
-
-        if (aiProvider === 'GATEWAY') {
-            const modelToUse = gatewayModel || GEMINI_DEFAULT_MODEL;
-            const fullGatewayUrl = `${gatewayUrl}/${modelToUse}/v1/chat/completions`;
-            const messages = history.map(msg => ({
-                role: msg.role === 'model' ? 'assistant' : 'user',
-                content: typeof msg.content === 'string' ? msg.content : JSON.stringify({ blocks: msg.content })
-            }));
-
-            const requestBody = {
-                model: modelToUse,
-                messages: [
-                    { role: 'system', content: analysisSystemInstructionForGateway(contextualData) },
-                    ...messages
-                ],
-                stream: false
-            };
-            const response = await fetch(fullGatewayUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${gatewayApiKey}` },
-                body: JSON.stringify(requestBody)
-            });
-            if (!response.ok) throw new Error(`Gateway request failed with status ${response.status}: ${await response.text()}`);
-            const data = await response.json();
-            jsonText = data.choices[0]?.message?.content;
-            if (!jsonText) throw new Error('Gateway response did not contain expected content.');
-        } else {
-            const ai = getAiInstance();
-            const contents: Content[] = history.map(msg => ({
-                role: msg.role,
-                parts: [{ text: typeof msg.content === 'string' ? msg.content : JSON.stringify({ blocks: msg.content }) }]
-            }));
-            const response = await ai.models.generateContent({
-                model: GEMINI_DEFAULT_MODEL,
-                contents: contents,
-                config: {
-                    systemInstruction: analysisSystemInstruction(contextualData),
-                    responseMimeType: "application/json",
-                    responseSchema: responseSchema,
-                }
-            });
-            jsonText = response.text;
-        }
+Please provide the analysis based on my question.
+`;
         
-        const parsedResponse = JSON.parse(jsonText.trim());
-        if (!parsedResponse.blocks || !Array.isArray(parsedResponse.blocks)) {
-            throw new Error("Invalid response format from AI: 'blocks' array not found.");
-        }
-        return parsedResponse.blocks as AIResponseBlock[];
+        const response = await ai.models.generateContent({
+            model: model,
+            contents: fullPrompt,
+            config: {
+                systemInstruction: systemInstruction,
+                responseMimeType: "application/json",
+            }
+        });
+
+        const jsonText = response.text;
+        
+        // Sometimes the model might wrap the JSON in ```json ... ```
+        const cleanedJsonText = jsonText.trim().replace(/^```json\n?/, '').replace(/\n?```$/, '');
+
+        const result: AIResponseBlock[] = JSON.parse(cleanedJsonText);
+        return result;
+
     } catch (error) {
-        console.error(`Error calling AI (Provider: ${aiProvider}):`, error);
-        const message = error instanceof Error ? error.message : 'An unknown error occurred.';
-        return [{
-            type: 'markdown',
-            data: `**Error:** An error occurred while analyzing the data: ${message}. Please check the console for more details.`
-        }];
+        console.error("Error generating insights from Gemini:", error);
+        // Create a user-friendly error response
+        const errorResponse: AIResponseBlock[] = [
+            {
+                type: 'markdown',
+                data: `**Error:** I encountered a problem while generating the analysis. This could be due to a malformed response from the AI. Please check the console for more details or try rephrasing your question.`
+            }
+        ];
+        return errorResponse;
     }
-};
+}
