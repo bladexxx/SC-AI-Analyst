@@ -1,0 +1,5 @@
+{
+  "name": "Supply Chain AI Analyst",
+  "description": "An AI-powered application to analyze and find discrepancies in supply chain data, focusing on ASN (Advanced Shipment Notice) quality and warehouse receiving match rates.",
+  "requestFramePermissions": []
+}
