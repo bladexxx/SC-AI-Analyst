@@ -140,7 +140,8 @@ const callAiGateway = async (systemPrompt: string, userPrompt: string): Promise<
     }
     
     const modelToUse = gatewayModel || model;
-    const fullGatewayUrl = `${gatewayUrl}`;
+    
+    const fullGatewayUrl = `${gatewayUrl}/${modelToUse}/v1/chat/completions`;
 
     console.log(`[AI Service] Sending request to Gateway URL: %c${fullGatewayUrl}`, 'font-weight: bold;');
 
