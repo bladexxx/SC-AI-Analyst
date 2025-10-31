@@ -1,173 +1,283 @@
-import { GoogleGenAI, Type } from "@google/genai";
-import { AIResponseBlock, CSVData, ChartData, CardData, TableData } from '../types';
+import { GoogleGenAI } from "@google/genai";
+import { AIResponseBlock, CSVData } from '../types';
 
-// Per guidelines, API key is from process.env.API_KEY and is assumed to be set.
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
-// fix: Use a model that is suitable for complex text tasks and JSON output.
-const model = "gemini-2.5-pro";
-
-const responseSchema = {
-    type: Type.OBJECT,
-    properties: {
-        responses: {
-            type: Type.ARRAY,
-            description: "A list of response blocks to display to the user.",
-            items: {
-                type: Type.OBJECT,
-                properties: {
-                    type: {
-                        type: Type.STRING,
-                        enum: ['card', 'table', 'chart', 'markdown'],
-                        description: "The type of the response block."
-                    },
-                    data: {
-                        type: Type.OBJECT,
-                        description: "Data for the block. Structure depends on the block type. For markdown, use the 'markdown' property.",
-                        properties: {
-                            // CardData
-                            title: { type: Type.STRING, description: "Title for the card." },
-                            value: { type: Type.STRING, description: "Main value for the card." },
-                            description: { type: Type.STRING, description: "Description for the card." },
-
-                            // TableData
-                            headers: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Table headers." },
-                            rows: { type: Type.ARRAY, items: { type: Type.ARRAY, items: { type: Type.STRING } }, description: "Table rows of string values." },
-
-                            // ChartData
-                            chartType: { type: Type.STRING, enum: ['bar', 'pie', 'line', 'doughnut'], description: "Type of chart." },
-                            labels: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Labels for the chart axes." },
-                            datasets: {
-                                type: Type.ARRAY,
-                                items: {
-                                    type: Type.OBJECT,
-                                    properties: {
-                                        label: { type: Type.STRING, description: "Dataset label." },
-                                        data: { type: Type.ARRAY, items: { type: Type.NUMBER }, description: "Numerical data for the dataset." },
-                                        backgroundColor: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Background colors for chart elements (e.g. hex codes)." },
-                                    },
-                                    required: ['label', 'data']
-                                },
-                                description: "The datasets for the chart."
-                            },
-
-                            // Markdown
-                            markdown: { type: Type.STRING, description: "The markdown content as a string." }
-                        }
-                    }
-                },
-                required: ['type', 'data']
-            }
-        }
-    },
-    required: ['responses']
+// This `declare` block informs TypeScript that the `process` object is globally available.
+// Vite's `define` configuration will replace these variables with their actual values
+// at build time, preventing runtime errors.
+declare var process: {
+  env: {
+    // This variable is provided by the execution environment, not Vite's define config.
+    API_KEY: string;
+    // These variables are injected by Vite's define config.
+    VITE_AI_PROVIDER: string;
+    VITE_AI_GATEWAY_URL: string;
+    VITE_AI_GATEWAY_API_KEY: string;
+    VITE_AI_GATEWAY_MODEL: string;
+  }
 };
 
+// --- AI Provider Configuration ---
+const model = 'gemini-2.5-pro';
 
-function constructPrompt(csvData: CSVData, prompt: string): string {
-    const headers = csvData.headers.join(', ');
-    // Take a sample of rows to avoid making the prompt too large
-    const rowsSample = csvData.rows.slice(0, 10).map(row => 
-        csvData.headers.map(header => row[header]).join(', ')
-    ).join('\n');
-    
-    return `
-        Analyze the following CSV data and answer the user's question.
-        The data has ${csvData.rows.length} rows and the following columns: ${headers}.
-        
-        Here is a sample of the first 10 rows:
-        ${rowsSample}
-        
-        User's Question: "${prompt}"
-        
-        Your task is to act as a data analyst. Based on the data and the user's question, generate a comprehensive response.
-        The response must be in the specified JSON format and should consist of a list of UI blocks (cards, tables, charts, or markdown).
-        - Use 'card' for single, important metrics or KPIs (e.g., Total Sales, Average Score).
-        - Use 'table' to display detailed data, either raw or aggregated. Keep tables concise.
-        - Use 'chart' to visualize trends, distributions, or comparisons. Choose the best chart type ('bar', 'pie', 'line', 'doughnut'). For chart colors, provide an array of hex color codes for 'backgroundColor'.
-        - Use 'markdown' for textual explanations, insights, summaries, or to answer questions that don't require a visualization.
-        - You can and should return multiple blocks of different types to create a rich, dashboard-like response. For example, a card with a key metric, a chart visualizing a trend, and a markdown block explaining the insight.
-        - Always ensure the data you provide in the blocks is directly derived from the provided CSV data.
-    `;
+// Read configuration from the process.env object. Vite's `define` config replaces these
+// variable names with their literal string values during the build.
+const aiProvider = process.env.VITE_AI_PROVIDER || 'GEMINI';
+const gatewayUrl = process.env.VITE_AI_GATEWAY_URL;
+const gatewayApiKey = process.env.VITE_AI_GATEWAY_API_KEY;
+const gatewayModel = process.env.VITE_AI_GATEWAY_MODEL;
+
+// Per project guidelines, the Gemini API key MUST come exclusively from the execution
+// environment's `process.env.API_KEY`.
+const geminiApiKey = process.env.API_KEY;
+
+// --- Startup Logging: Log the configuration as soon as the module is loaded ---
+console.groupCollapsed('[AI Service] Configuration Loaded');
+console.info(`AI Provider: %c${aiProvider}`, 'font-weight: bold;');
+if (aiProvider === 'GATEWAY') {
+    console.log(`Gateway Base URL: ${gatewayUrl || 'Not Set'}`);
+    console.log(`Gateway Model: ${gatewayModel || `(default: ${model})`}`);
+    console.log(`Gateway API Key Set: %c${!!gatewayApiKey}`, `font-weight: bold; color: ${!!gatewayApiKey ? 'green' : 'red'};`);
+} else {
+     console.log(`Gemini API Key Set: %c${!!geminiApiKey}`, `font-weight: bold; color: ${!!geminiApiKey ? 'green' : 'red'};`);
+}
+console.groupEnd();
+
+if (aiProvider === 'GATEWAY' && (!gatewayUrl || !gatewayApiKey)) {
+    console.error('[AI Service] CRITICAL: AI Gateway is the configured provider, but VITE_AI_GATEWAY_URL or VITE_AI_GATEWAY_API_KEY is missing in your .env file.');
+} else if (aiProvider === 'GEMINI' && !geminiApiKey) {
+    console.error('[AI Service] CRITICAL: Gemini is the configured provider, but the API_KEY was not found in the environment. This must be configured in the execution environment where the app is hosted.');
+}
+// --- End of Startup Logging ---
+
+// System instruction for the main "Analyst" model
+const analysisSystemInstruction = `
+You are an expert supply chain data analyst. Your task is to analyze the provided CSV data which contains Advanced Shipment Notice (ASN) and warehouse receiving information.
+
+Here is the definition of the columns in the data:
+- loc_no: The warehouse number (numeric).
+- carrier: The shipping carrier (e.g., UPS, FEDEX).
+- rec_date: The date the shipment was received at the warehouse.
+- tracking_no: The tracking number scanned from the package at the warehouse.
+- vend_track_no: The tracking number provided by the vendor in the shipment notice. A key analysis is to compare this with 'tracking_no' for mismatches.
+- api_source: The channel through which the shipment notice was received.
+- return_po: The Purchase Order number matched to the tracking number. Missing values here can indicate a potential problem.
+- run_date: The date this report was generated.
+- week_period / week_begin: The weekly period the data belongs to.
+
+Your primary goal is to identify discrepancies, summarize performance, and answer user questions.
+
+You MUST respond with a JSON array of "blocks". Each block represents a piece of content to be displayed.
+The response must be a valid JSON array conforming to the following TypeScript interfaces:
+
+// A single block of content in an AI response
+export interface AIResponseBlock {
+  type: 'card' | 'table' | 'chart' | 'markdown';
+  data: CardData | TableData | ChartData | string; // For markdown, data is a string. For others, it's an object.
+}
+
+// Data for a 'card' block
+export interface CardData {
+  title: string;
+  value: string;
+  description?: string;
+}
+
+// Data for a 'table' block
+export interface TableData {
+  headers: string[];
+  rows: (string | number)[][];
+}
+
+// Data for a 'chart' block
+export interface ChartData {
+  type: 'bar' | 'pie' | 'line' | 'doughnut';
+  labels: string[];
+  datasets: {
+    label: string;
+    data: number[];
+    backgroundColor?: string[]; // Recommended for pie/doughnut/bar charts
+  }[];
 }
 
 
-export async function generateInsights(csvData: CSVData, userPrompt: string): Promise<AIResponseBlock[]> {
-    const prompt = constructPrompt(csvData, userPrompt);
+// Your response should be a JSON array of AIResponseBlock objects.
+// Example: 
+// [ 
+//   { "type": "markdown", "data": "Here is a summary of the data." }, 
+//   { "type": "card", "data": { "title": "Total Mismatches", "value": "12", "description": "12% of total shipments." } },
+//   { "type": "chart", "data": { "type": "pie", "labels": ["Matched", "Mismatched"], "datasets": [{ "label": "Tracking Numbers", "data": [88, 12] }] } }
+// ]
+
+- When creating charts, select appropriate colors. For single-dataset bar/line charts, a single color is fine. For pie/doughnut charts, provide a list of colors for 'backgroundColor'.
+- When the user asks for a summary or general analysis, provide a mix of markdown, cards, and charts focusing on key supply chain metrics like match rates.
+- Keep your analysis concise and directly related to the user's query.
+- The entire response must be a single JSON string, which is an array of these block objects. Do not add any text before or after the JSON array.
+`;
+
+// System instruction for the "Planner" model, which selects necessary columns.
+const plannerSystemInstruction = `You are an efficient data query planner. Your task is to determine the absolute minimum set of columns required to answer the user's question based on the available CSV columns.
+Respond ONLY with a valid JSON object containing a single key "columns", which is an array of column name strings.
+For example: {"columns": ["carrier", "tracking_no"]}.
+If the user asks for a general summary, a broad question, or it is otherwise necessary to see all data, respond with {"columns": ["*"]}.`;
+
+
+// Helper to convert CSV data to a markdown-like string for the prompt
+const csvToText = (csvData: CSVData): string => {
+    if (!csvData || csvData.rows.length === 0) {
+        return "";
+    }
+    const header = csvData.headers.join(',');
+    const rows = csvData.rows.map(row => csvData.headers.map(h => row[h]).join(','));
+    return [header, ...rows].join('\n');
+}
+
+/**
+ * Internal helper to make a POST request to the AI Gateway, following an OpenAI-compatible structure.
+ */
+const callAiGateway = async (systemPrompt: string, userPrompt: string): Promise<any> => {
+    if (!gatewayUrl || !gatewayApiKey) {
+        throw new Error('AI Gateway is configured, but URL or API Key is missing.');
+    }
     
-    try {
+    const modelToUse = gatewayModel || model;
+    const fullGatewayUrl = `${gatewayUrl}`;
+
+    console.log(`[AI Service] Sending request to Gateway URL: %c${fullGatewayUrl}`, 'font-weight: bold;');
+
+    const requestBody = {
+        model: modelToUse,
+        messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+        ],
+        stream: false,
+        response_format: { "type": "json_object" }
+    };
+
+    const response = await fetch(fullGatewayUrl, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${gatewayApiKey}`
+        },
+        body: JSON.stringify(requestBody)
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`AI Gateway request failed with status ${response.status}: ${errorText}`);
+    }
+
+    const responseJson = await response.json();
+    if (responseJson.choices && responseJson.choices[0] && responseJson.choices[0].message && responseJson.choices[0].message.content) {
+        return responseJson.choices[0].message.content;
+    } else {
+        throw new Error('Invalid response structure from AI Gateway.');
+    }
+};
+
+/**
+ * Step 1: The "Planner" - determines which columns are needed for the query.
+ */
+const getRequiredColumnsForQuery = async (headers: string[], prompt: string): Promise<string[]> => {
+    const plannerUserPrompt = `
+    User Question: "${prompt}"
+    Available Columns: ${JSON.stringify(headers)}
+    `;
+
+    let jsonText: string;
+
+    if (aiProvider === 'GATEWAY') {
+        jsonText = await callAiGateway(plannerSystemInstruction, plannerUserPrompt);
+    } else {
+        const ai = new GoogleGenAI({ apiKey: geminiApiKey });
         const response = await ai.models.generateContent({
             model: model,
-            contents: prompt,
+            contents: plannerUserPrompt,
             config: {
+                systemInstruction: plannerSystemInstruction,
                 responseMimeType: "application/json",
-                responseSchema: responseSchema,
-            },
-        });
-        
-        const jsonText = response.text.trim();
-        // The response might be wrapped in ```json ... ```
-        const cleanJsonText = jsonText.replace(/^```json/, '').replace(/```$/, '').trim();
-        const parsedJson = JSON.parse(cleanJsonText);
-
-        if (!parsedJson.responses || !Array.isArray(parsedJson.responses)) {
-            console.error("Invalid response format from AI:", parsedJson);
-            throw new Error("AI response is not in the expected format.");
-        }
-
-        // Post-process the response to match the app's internal types
-        const aiBlocks: AIResponseBlock[] = parsedJson.responses.map((block: any): AIResponseBlock | null => {
-            if (!block.type || !block.data) return null;
-
-            switch(block.type) {
-                case 'markdown':
-                    return {
-                        type: 'markdown',
-                        data: block.data.markdown || ''
-                    };
-                case 'chart': {
-                    const chartData: ChartData = {
-                        type: block.data.chartType,
-                        labels: block.data.labels || [],
-                        datasets: block.data.datasets || []
-                    };
-                    return { type: 'chart', data: chartData };
-                }
-                case 'card': {
-                     const cardData: CardData = {
-                        title: block.data.title || 'Untitled',
-                        value: block.data.value || 'N/A',
-                        description: block.data.description
-                    };
-                    return { type: 'card', data: cardData };
-                }
-                case 'table': {
-                    const tableData: TableData = {
-                        headers: block.data.headers || [],
-                        rows: block.data.rows || []
-                    };
-                    return { type: 'table', data: tableData };
-                }
-                default:
-                    return null;
             }
-        }).filter((b): b is AIResponseBlock => b !== null);
+        });
+        jsonText = response.text;
+    }
+    
+    const result = JSON.parse(jsonText);
+    return result.columns as string[];
+};
 
-        if (aiBlocks.length === 0) {
-            return [{
-                type: 'markdown',
-                data: "I was unable to generate a valid visualization for your request. Please try rephrasing your question."
-            }];
+/**
+ * Main function to generate insights, orchestrating the Planner and Analyst steps.
+ */
+export const generateInsights = async (fullCsvData: CSVData, prompt: string): Promise<AIResponseBlock[]> => {
+    try {
+        // --- PLANNER STEP ---
+        console.log('[AI Service] Step 1: Planning - determining required columns...');
+        const requiredColumns = await getRequiredColumnsForQuery(fullCsvData.headers, prompt);
+        console.log('[AI Service] Required columns:', requiredColumns);
+
+        let contextualCsvData = fullCsvData;
+        if (requiredColumns.length > 0 && requiredColumns[0] !== '*') {
+            contextualCsvData = {
+                headers: requiredColumns,
+                rows: fullCsvData.rows.map(row => {
+                    const newRow: Record<string, string> = {};
+                    for (const header of requiredColumns) {
+                        newRow[header] = row[header];
+                    }
+                    return newRow;
+                })
+            };
         }
 
-        return aiBlocks;
+        // --- ANALYST STEP ---
+        console.log('[AI Service] Step 2: Analyzing - generating insights with contextual data...');
+        const dataAsText = csvToText(contextualCsvData);
+        const fullPrompt = `
+Here is the CSV data I'm working with (it has been pre-filtered to include only the columns relevant to my query):
+---
+${dataAsText}
+---
+
+My question is: ${prompt}
+
+Please provide the analysis based on my question.
+`;
+        
+        let jsonText: string;
+
+        if (aiProvider === 'GATEWAY') {
+            console.log('[AI Service] Using AI Gateway provider for analysis.');
+            jsonText = await callAiGateway(analysisSystemInstruction, fullPrompt);
+        } else {
+            console.log('[AI Service] Using Gemini provider for analysis.');
+            if (!geminiApiKey) {
+                throw new Error('Gemini is the configured provider, but the API_KEY is missing.');
+            }
+            const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+            const response = await ai.models.generateContent({
+                model: model,
+                contents: fullPrompt,
+                config: {
+                    systemInstruction: analysisSystemInstruction,
+                    responseMimeType: "application/json",
+                }
+            });
+            jsonText = response.text;
+        }
+        
+        const cleanedJsonText = jsonText.trim().replace(/^```json\n?/, '').replace(/\n?```$/, '');
+        const result: AIResponseBlock[] = JSON.parse(cleanedJsonText);
+        return result;
 
     } catch (error) {
-        console.error("Error generating insights from Gemini:", error);
-        // Provide a user-friendly error message
-        const errorMessage = error instanceof Error ? error.message : "An unknown error occurred.";
-        return [{
-            type: 'markdown',
-            data: `Sorry, I encountered an error while analyzing the data.\n\n**Error:** ${errorMessage}\n\nPlease check the console for details and try again.`
-        }];
+        console.error("Error generating insights:", error);
+        const errorResponse: AIResponseBlock[] = [
+            {
+                type: 'markdown',
+                data: `**Error:** I encountered a problem while generating the analysis. This could be due to a malformed response from the AI, a network issue, or a configuration problem. Please check the console for more details or try rephrasing your question.`
+            }
+        ];
+        return errorResponse;
     }
 }
