@@ -45,3 +45,20 @@ export interface KnowledgeFile {
   name: string;
   content: string;
 }
+
+// --- New types for the Hybrid Analysis Execution Plan ---
+
+export interface Filter {
+  column: string;
+  operator: 'equals' | 'not_equals' | 'contains' | 'is_empty' | 'is_not_empty';
+  value?: string | number;
+}
+
+export type CalculationType = 'mismatch_rate' | 'missing_po_rate' | 'count';
+
+export interface ExecutionPlan {
+  action: 'direct_analysis' | 'filter_and_analyze';
+  filters?: Filter[];
+  calculations?: CalculationType[];
+  data_subset_columns?: string[];
+}
