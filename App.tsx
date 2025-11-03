@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import type { ChatMessage, CSVData, AIResponseBlock, KnowledgeFile } from './types';
 import { generateInsights } from './services/geminiService';
-import { tryLocalAnalysis } from './services/localAnalysisService';
 import AIResponse from './components/MetricCard';
 import Spinner from './components/Spinner';
 import { UploadIcon, LightBulbIcon, SendIcon, ChartBarIcon, BookOpenIcon } from './components/icons';
@@ -178,22 +177,6 @@ const App: React.FC = () => {
     setUserInput('');
     setIsLoading(true);
 
-    // --- LOCAL ANALYSIS STEP ---
-    const localAnalysisResult = tryLocalAnalysis(messageText, csvData);
-    
-    if (localAnalysisResult) {
-        const modelMessage: ChatMessage = {
-            id: `model-local-${Date.now()}`,
-            role: 'model',
-            content: localAnalysisResult,
-        };
-        setMessages(prev => [...prev, modelMessage]);
-        setIsLoading(false);
-        return; // Exit before calling AI
-    }
-    // --- END LOCAL ANALYSIS ---
-
-
     try {
       const knowledgeContent = knowledgeFiles
         .map(f => `--- KNOWLEDGE FILE: ${f.name} ---\n${f.content}`)
@@ -232,7 +215,7 @@ const App: React.FC = () => {
   const suggestionPrompts = [
     "Find tracking number mismatches.",
     "Show distribution of carrier.",
-    "Count unique values of api_source.",
+    "What's the mismatch rate for VEND-A?",
     "Show me shipments that are missing a PO number.",
   ];
 
@@ -318,7 +301,7 @@ const App: React.FC = () => {
                        </div>
                        <div className="bg-base-200 rounded-lg p-4 flex items-center gap-2">
                           <Spinner />
-                           <span className="text-content-100">{userInput.toLowerCase().includes('distribution') || userInput.toLowerCase().includes('count') ? 'Calculating...' : 'Analyzing...'}</span>
+                           <span className="text-content-100">Analyzing...</span>
                        </div>
                    </div>
                 )}
