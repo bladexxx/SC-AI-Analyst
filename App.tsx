@@ -1,12 +1,16 @@
 import React, { useState, useRef, useEffect } from 'react';
 import type { ChatMessage, CSVData, AIResponseBlock, KnowledgeFile } from './types';
 import { generateInsights } from './services/geminiService';
+import { tryLocalAnalysis } from './services/localAnalysisService';
 import AIResponse from './components/MetricCard';
 import Spinner from './components/Spinner';
 import { UploadIcon, LightBulbIcon, SendIcon, ChartBarIcon, BookOpenIcon } from './components/icons';
 import KnowledgeBaseModal from './components/KnowledgeBaseModal';
 
-const parseCSV = (csvText: string): CSVData => {
+// Add this declaration to inform TypeScript about the XLSX library from the CDN
+declare var XLSX: any;
+
+const parseSampleCSV = (csvText: string): CSVData => {
   const lines = csvText.trim().split('\n');
   const headers = lines[0].split(',').map(h => h.trim());
   const rows = lines.slice(1).map(line => {
@@ -90,11 +94,29 @@ const App: React.FC = () => {
       const reader = new FileReader();
       reader.onload = (e) => {
         try {
-          const text = e.target?.result as string;
-          if (!text) {
-              throw new Error("File is empty.");
+          if (!e.target?.result) {
+              throw new Error("File is empty or could not be read.");
           }
-          const parsedData = parseCSV(text);
+          const data = new Uint8Array(e.target.result as ArrayBuffer);
+          const workbook = XLSX.read(data, { type: 'array' });
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+          const jsonData: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+          
+          if (jsonData.length < 2) {
+            throw new Error("Excel file must have a header row and at least one data row.");
+          }
+
+          const headers = jsonData[0].map(String);
+          const rows = jsonData.slice(1).map(rowData => {
+            return headers.reduce((obj, header, index) => {
+              obj[header] = rowData[index] !== undefined ? String(rowData[index]) : '';
+              return obj;
+            }, {} as Record<string, string>);
+          });
+
+          const parsedData = { headers, rows };
+
           setCsvData(parsedData);
           setMessages([
             {
@@ -108,7 +130,7 @@ const App: React.FC = () => {
           ]);
           setError('');
         } catch (err) {
-          setError('Failed to parse CSV file. Please ensure it is correctly formatted.');
+          setError('Failed to parse Excel file. Please ensure it is a valid .xlsx file with a header row.');
           setFileName('');
           setCsvData(null);
         }
@@ -116,15 +138,15 @@ const App: React.FC = () => {
       reader.onerror = () => {
         setError('Failed to read the file.');
       }
-      reader.readAsText(file);
+      reader.readAsArrayBuffer(file);
     }
   };
   
   const handleLoadSampleData = () => {
     try {
-      const sampleFileName = 'sample_asn_data.csv';
+      const sampleFileName = 'sample_asn_data.xlsx';
       setFileName(sampleFileName);
-      const parsedData = parseCSV(sampleCSVData);
+      const parsedData = parseSampleCSV(sampleCSVData);
       setCsvData(parsedData);
       setMessages([
         {
@@ -155,6 +177,22 @@ const App: React.FC = () => {
     setMessages(prev => [...prev, userMessage]);
     setUserInput('');
     setIsLoading(true);
+
+    // --- LOCAL ANALYSIS STEP ---
+    const localAnalysisResult = tryLocalAnalysis(messageText, csvData);
+    
+    if (localAnalysisResult) {
+        const modelMessage: ChatMessage = {
+            id: `model-local-${Date.now()}`,
+            role: 'model',
+            content: localAnalysisResult,
+        };
+        setMessages(prev => [...prev, modelMessage]);
+        setIsLoading(false);
+        return; // Exit before calling AI
+    }
+    // --- END LOCAL ANALYSIS ---
+
 
     try {
       const knowledgeContent = knowledgeFiles
@@ -192,10 +230,10 @@ const App: React.FC = () => {
   };
 
   const suggestionPrompts = [
-    "Give me a summary of this data.",
     "Find tracking number mismatches.",
+    "Show distribution of carrier.",
+    "Count unique values of api_source.",
     "Show me shipments that are missing a PO number.",
-    "Summarize shipments by carrier.",
   ];
 
   return (
@@ -227,15 +265,15 @@ const App: React.FC = () => {
             <div className="flex flex-col items-center justify-center h-full">
               <div className="w-full max-w-lg text-center">
                 <h2 className="text-2xl font-semibold mb-2 text-white">Analyze Your Supply Chain Data</h2>
-                <p className="text-content-200 mb-6">Upload a CSV file or use our sample data to get started.</p>
+                <p className="text-content-200 mb-6">Upload an Excel file (.xlsx) or use our sample data to get started.</p>
                 
                 <div 
                   className="border-2 border-dashed border-base-300 rounded-lg p-8 cursor-pointer hover:border-brand-secondary hover:bg-base-200 transition-colors"
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  <input type="file" ref={fileInputRef} onChange={handleFileChange} accept=".csv" className="hidden" />
+                  <input type="file" ref={fileInputRef} onChange={handleFileChange} accept=".xlsx, .xls" className="hidden" />
                   <UploadIcon className="mx-auto w-12 h-12 text-content-200 mb-4" />
-                  <p className="text-content-100">Click to browse or drag & drop a CSV file here</p>
+                  <p className="text-content-100">Click to browse or drag & drop an Excel file here</p>
                 </div>
 
                 <div className="my-4 text-content-200">OR</div>
@@ -280,7 +318,7 @@ const App: React.FC = () => {
                        </div>
                        <div className="bg-base-200 rounded-lg p-4 flex items-center gap-2">
                           <Spinner />
-                          <span className="text-content-100">Analyzing...</span>
+                           <span className="text-content-100">{userInput.toLowerCase().includes('distribution') || userInput.toLowerCase().includes('count') ? 'Calculating...' : 'Analyzing...'}</span>
                        </div>
                    </div>
                 )}
