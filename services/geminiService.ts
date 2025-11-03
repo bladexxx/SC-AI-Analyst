@@ -51,7 +51,7 @@ if (aiProvider === 'GATEWAY' && (!gatewayUrl || !gatewayApiKey)) {
 
 // System instruction for the main "Analyst" model
 const analysisSystemInstruction = `
-You are an expert supply chain data analyst. Your task is to analyze the provided CSV data which contains Advanced Shipment Notice (ASN) and warehouse receiving information.
+You are an expert supply chain data analyst. Your task is to analyze the provided data from a spreadsheet which contains Advanced Shipment Notice (ASN) and warehouse receiving information.
 
 Here is the definition of the columns in the data:
 - loc_no: The warehouse number (numeric).
@@ -116,7 +116,7 @@ export interface ChartData {
 `;
 
 // System instruction for the "Planner" model, which selects necessary columns.
-const plannerSystemInstruction = `You are an efficient data query planner. Your task is to determine the absolute minimum set of columns required to answer the user's question based on the available CSV columns and any additional knowledge provided.
+const plannerSystemInstruction = `You are an efficient data query planner. Your task is to determine the absolute minimum set of columns required to answer the user's question based on the available data columns and any additional knowledge provided.
 Respond ONLY with a valid JSON object containing a single key "columns", which is an array of column name strings.
 For example: {"columns": ["carrier", "tracking_no"]}.
 If the user asks for a general summary, a broad question, or it is otherwise necessary to see all data, respond with {"columns": ["*"]}.`;
@@ -240,7 +240,7 @@ export const generateInsights = async (fullCsvData: CSVData, prompt: string, kno
         const dataAsText = csvToText(contextualCsvData);
         const fullPrompt = `
 ${knowledgeContent ? `--- KNOWLEDGE BASE ---\n${knowledgeContent}\n--- END KNOWLEDGE BASE ---\n\n` : ''}
-Here is the CSV data I'm working with (it has been pre-filtered to include only the columns relevant to my query):
+Here is the data I'm working with (it has been pre-filtered to include only the columns relevant to my query):
 ---
 ${dataAsText}
 ---
